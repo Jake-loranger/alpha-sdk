@@ -84,6 +84,7 @@ export type {
   MarketsChangedEvent,
   MarketChangedEvent,
   WalletOrdersChangedEvent,
+  ComboRfqSide,
   ComboRfqRequestEvent,
   ComboRfqFillRequestEvent,
   ComboRfqQuoteReference,
