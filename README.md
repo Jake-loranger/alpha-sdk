@@ -658,7 +658,7 @@ The client automatically responds to server pings, sends keepalive pings, and re
 
 ### Combo RFQ
 
-Competitive quotes for **AND/OR combo purchases**. Your API key is required. Alpha always quotes as the house; connected partner makers can compete over the same platform WebSocket used for public streams.
+Competitive quotes for **AND/OR combo purchases and combo cash-outs**. Your API key is required. Alpha always quotes as the house; connected partner makers can compete over the same platform WebSocket used for public streams.
 
 This is separate from single-market cross-venue RFQ (`requestRfqQuote` / `submitRoutedOrder`).
 
@@ -729,12 +729,17 @@ Important taker notes:
 
 #### Quote combos as a maker
 
-Connected partner makers compete to fill combos in a **reverse auction**: when a
-trader prices a combo, every maker receives the full order over the platform
-WebSocket and returns a YES price. The **lowest** price wins the trader's flow —
-and you only win by **beating Alpha's house quote** (which is never broadcast to
-you). Alpha is always the backstop, so there is no obligation to quote and no
-adverse fill: you win only when you choose to and are cheaper.
+Connected partner makers compete on **both** taker directions:
+
+- **`buy` RFQ** — the taker is buying combo YES. This is a **reverse auction**:
+  the **lowest** YES price wins, and you only beat Alpha by quoting cheaper than
+  its hidden house quote.
+- **`sell` RFQ** — the taker is cashing out an existing combo YES position. This
+  is a **forward auction**: the **highest** YES buy price wins, and you only beat
+  Alpha by bidding above `alphaPriceMicro` (broadcast on sell requests).
+
+Alpha is always the backstop, so quoting is optional: you only win when you send
+the most competitive price and then confirm the fill in time.
 
 **Prerequisites**
 
@@ -751,8 +756,9 @@ adverse fill: you win only when you choose to and are cheaper.
 import algosdk from 'algosdk';
 import { AlphaWebSocket } from '@alpha-arcade/sdk';
 
-const maker = algosdk.mnemonicToSecretKey(process.env.MAKER_MNEMONIC!);
+const maker = algosdk.mnemonicToSecretKey(process.env.TEST_MNEMONIC!);
 const signer = algosdk.makeBasicAccountTransactionSigner(maker);
+const MIN_EDGE_MICRO = 5_000;
 
 const ws = new AlphaWebSocket({
   apiKey: process.env.ALPHA_API_KEY!,     // your partner key
@@ -766,10 +772,21 @@ const session = await ws.openComboRfqMakerSession({
 
 for await (const event of session) {
   if (event.type === 'combo_rfq_request') {
-    // Anchor on the broadcast fair price and quote fair + your edge. Lower YES
-    // price = more competitive. Skip if there's no profitable price for you.
     if (event.fairPriceMicro == null) continue;
-    await session.quote(event, { priceMicro: event.fairPriceMicro + 5_000 });
+
+    const side = event.side ?? 'buy';
+    if (side === 'sell') {
+      // SELL RFQ: taker cashes out YES, you BUY it. Higher bid wins, but it must
+      // beat Alpha's own cash-out offer.
+      const alpha = event.alphaPriceMicro ?? 0;
+      const priceMicro = event.fairPriceMicro - MIN_EDGE_MICRO;
+      if (priceMicro <= alpha) continue;
+      await session.quote(event, { priceMicro });
+    } else {
+      // BUY RFQ: taker buys YES, you lay NO. Lower YES price wins.
+      const priceMicro = event.fairPriceMicro + MIN_EDGE_MICRO;
+      await session.quote(event, { priceMicro });
+    }
     continue;
   }
 
@@ -779,7 +796,7 @@ for await (const event of session) {
       await session.decline(event, 'expired');
       continue;
     }
-    await session.confirm(event);         // signs maker legs with the session signer
+    await session.confirm(event);         // BUY signs NO-lay legs; SELL signs YES-buy legs
   }
 }
 ```
@@ -789,8 +806,13 @@ for await (const event of session) {
 Every `combo_rfq_request` carries **`fairPriceMicro`** — the whole-combo FAIR
 probability (pre-edge, in microunits). This is your anchor: it's computable by
 any maker with the underlying odds (so it leaks none of Alpha's margin) and lets
-you quote **without a round trip** to price the tree. Quote a hair above fair to
-keep an edge while still undercutting Alpha's marked-up house price.
+you quote **without a round trip** to price the tree.
+
+- On **`buy`** requests, quote a little **above fair** (`fair + edge`) and
+  compete by going **lower** than other makers.
+- On **`sell`** requests, quote a little **below fair** (`fair - edge`) and
+  compete by going **higher** than other makers, while still beating
+  `alphaPriceMicro`.
 
 To price independently instead of anchoring, each leg tells you what it is:
 
@@ -805,6 +827,9 @@ To price independently instead of anchoring, each leg tells you what it is:
   and same-game (SGP/mixed) tickets. Flat parlays arrive as a single
   ALL-must-win group (`groups.length === 1`, `op: 'AND'`, no connectors), so
   don't assume multiple groups.
+- **Sell-side extras** — `sell` requests also carry `alphaPriceMicro`,
+  `quantityMicro`, `marketId`, `marketAppId`, and `yesAssetId` so makers can
+  size the cash-out, hedge it, and compare against Alpha's reserve.
 - `description` on each leg is a plain-english label
   (e.g. `"NFL Champion 2027 — Baltimore Ravens"`) for logging/UI.
 
@@ -816,9 +841,12 @@ API probe, and run **close to `us-east-1`**.
 **Settlement is non-custodial and tamper-proof.** You sign only your own maker
 legs, from your own wallet. On submit the server rebuilds the transaction group
 **byte-for-byte** from the pinned quote and rejects any mismatch, then settles the
-whole combo as one **atomic group in USDC on Algorand**. You fund the opposite
-side of the trader's position — `(1e6 - priceMicro)` per contract — so a
-long-shot combo's edge is realised on its likely miss.
+whole combo as one **atomic group in USDC on Algorand**.
+
+- On **`buy`** fills, you fund the NO-lay side of the trader's purchase —
+  roughly `(1e6 - priceMicro)` per contract.
+- On **`sell`** fills, you fund the YES buy side of the trader's cash-out —
+  roughly `floor(quantity * priceMicro / 1e6) + fee`.
 
 Maker helpers on the session:
 
@@ -832,7 +860,7 @@ Maker helpers on the session:
 Runnable example: `examples/combo-rfq-maker.ts`
 
 ```bash
-ALPHA_API_KEY=... MAKER_MNEMONIC=... npx tsx examples/combo-rfq-maker.ts
+ALPHA_API_KEY=... TEST_MNEMONIC=... npx tsx examples/combo-rfq-maker.ts
 ```
 
 ---
