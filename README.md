@@ -973,6 +973,21 @@ try {
 }
 ```
 
+## Disclaimer
+
+This SDK, the included examples, and any related scripts are provided as tools
+for informational and development purposes only. Nothing in this repository
+constitutes financial, investment, legal, or tax advice.
+
+You are solely responsible for reviewing, testing, and understanding any code,
+transactions, strategies, or automations you choose to run. Use of these tools
+is at your own risk. The authors and maintainers disclaim liability for any
+losses, damages, or other consequences arising from the use or misuse of this
+software.
+
+Always do your own research before using these tools with real funds,
+production systems, or live markets.
+
 ## License
 
 MIT
