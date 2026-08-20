@@ -36,11 +36,12 @@ for await (const event of session) {
       console.log("combo_rfq_request: ", JSON.stringify(event, null, 2));
 
       // ── Pricing ──────────────────────────────────────────────────────────
-      // Every request carries `fairPriceMicro` — the whole-combo FAIR probability
-      // (pre-edge, micro). It's your anchor: makers with a model should price from
-      // it (or their own book), but the anchor lets you compete on day one.
+      // When present, `fairPriceMicro` is the whole-combo FAIR probability
+      // (pre-edge, micro) — an anchor so you can compete without a local model.
       //
-      // Each leg carries what you need to price it independently:
+      // When ABSENT, Alpha could not live-price this combo (a SELL/cash-out
+      // whose legs have no Polymarket book). You MUST price `event.tree`
+      // yourself:
       //   • AA legs:  { marketId, marketAppId, selection, description }
       //               → read the on-chain order book by `marketAppId`.
       //   • SGP legs: { graderId, sgp, league, eventId, description }
@@ -48,12 +49,11 @@ for await (const event of session) {
       //                 needs the BlazeBuilder `sgp` token).
       const fair = event.fairPriceMicro;
       if (fair == null) {
-        // No anchor (older server) and no local model → skip rather than misprice.
-        console.log(`skip ${event.rfqId}: no fair anchor and no local pricer`);
+        console.log(`skip ${event.rfqId}: no fairPriceMicro — price this combo from the tree yourself`);
         continue;
       }
 
-      const side = event.side ?? 'buy';
+      const side = event.side;
       let priceMicro: number;
       if (side === 'sell') {
         // SELL (cash-out) — a FORWARD auction. The taker is SELLING their YES and
@@ -63,15 +63,15 @@ for await (const event of session) {
         // (~ floor(qty·price) + fee USDC) and opt into the YES asset; your edge is
         // fair − price, realised if the combo hits (you paid < $1/share for it).
         const bid = fair - MIN_EDGE_MICRO; // quote fair − your edge
-        const alpha = event.alphaPriceMicro ?? 0;
-        if (bid <= alpha) {
+        const alpha = event.alphaPriceMicro;
+        if (alpha != null && bid <= alpha) {
           console.log(`skip ${event.rfqId}: fair−edge ${bid}µ can't beat Alpha ${alpha}µ`);
           continue;
         }
         priceMicro = bid;
         await session.quote(event, { priceMicro });
-        console.log(`SELL quoted ${priceMicro}µ on ${event.rfqId} (fair ${fair}µ − ${MIN_EDGE_MICRO}µ edge, beats Alpha ${alpha}µ)`);
-      } else {
+        console.log(`SELL quoted ${priceMicro}µ on ${event.rfqId} (fair ${fair}µ − ${MIN_EDGE_MICRO}µ edge${alpha != null ? `, beats Alpha ${alpha}µ` : ', no Alpha reserve'})`);
+      } else if (side === 'buy') {
         // BUY — a REVERSE auction: the LOWEST YES price wins, and you only win by
         // beating Alpha's house quote (never broadcast). Quote just above fair so
         // you keep an edge but still undercut Alpha. If you win you post the NO
@@ -80,8 +80,10 @@ for await (const event of session) {
         priceMicro = fair + MIN_EDGE_MICRO; // quote fair + your edge
         await session.quote(event, { priceMicro });
         console.log(`BUY quoted ${priceMicro}µ on ${event.rfqId} (fair ${fair}µ + ${MIN_EDGE_MICRO}µ edge)`);
+      } else {
+        console.log(`skip ${event.rfqId}: unknown side ${side}`);
+        continue;
       }
-      continue;
     }
 
     if (event.type === 'combo_rfq_fill_request') {

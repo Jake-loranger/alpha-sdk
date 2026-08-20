@@ -772,15 +772,18 @@ const session = await ws.openComboRfqMakerSession({
 
 for await (const event of session) {
   if (event.type === 'combo_rfq_request') {
+    // When fairPriceMicro is missing, Alpha could not live-price the combo —
+    // you must price `event.tree` yourself (AA books / SGP feed). This snippet
+    // has no local model, so it skips those RFQs.
     if (event.fairPriceMicro == null) continue;
 
     const side = event.side ?? 'buy';
     if (side === 'sell') {
-      // SELL RFQ: taker cashes out YES, you BUY it. Higher bid wins, but it must
-      // beat Alpha's own cash-out offer.
-      const alpha = event.alphaPriceMicro ?? 0;
+      // SELL RFQ: taker cashes out YES, you BUY it. Higher bid wins. When Alpha
+      // has an offer (`alphaPriceMicro`), you must beat it upward.
+      const alpha = event.alphaPriceMicro;
       const priceMicro = event.fairPriceMicro - MIN_EDGE_MICRO;
-      if (priceMicro <= alpha) continue;
+      if (alpha != null && priceMicro <= alpha) continue;
       await session.quote(event, { priceMicro });
     } else {
       // BUY RFQ: taker buys YES, you lay NO. Lower YES price wins.
@@ -803,16 +806,22 @@ for await (const event of session) {
 
 **Pricing the combo**
 
-Every `combo_rfq_request` carries **`fairPriceMicro`** — the whole-combo FAIR
+Most `combo_rfq_request`s carry **`fairPriceMicro`** — the whole-combo FAIR
 probability (pre-edge, in microunits). This is your anchor: it's computable by
 any maker with the underlying odds (so it leaks none of Alpha's margin) and lets
 you quote **without a round trip** to price the tree.
 
+**When `fairPriceMicro` is missing, Alpha could not live-price the combo**
+(typically a SELL / cash-out whose legs have no Polymarket order book). You
+**must price `tree` yourself** from AA books / your SGP feed. `alphaPriceMicro`
+is omitted in the same case — there is no house reserve to beat, so any valid
+bid can win.
+
 - On **`buy`** requests, quote a little **above fair** (`fair + edge`) and
   compete by going **lower** than other makers.
 - On **`sell`** requests, quote a little **below fair** (`fair - edge`) and
-  compete by going **higher** than other makers, while still beating
-  `alphaPriceMicro`.
+  compete by going **higher** than other makers. When `alphaPriceMicro` is
+  present, you must also beat that reserve.
 
 To price independently instead of anchoring, each leg tells you what it is:
 
@@ -827,9 +836,10 @@ To price independently instead of anchoring, each leg tells you what it is:
   and same-game (SGP/mixed) tickets. Flat parlays arrive as a single
   ALL-must-win group (`groups.length === 1`, `op: 'AND'`, no connectors), so
   don't assume multiple groups.
-- **Sell-side extras** — `sell` requests also carry `alphaPriceMicro`,
-  `quantityMicro`, `marketId`, `marketAppId`, and `yesAssetId` so makers can
-  size the cash-out, hedge it, and compare against Alpha's reserve.
+- **Sell-side extras** — `sell` requests also carry `quantityMicro`,
+  `marketId`, `marketAppId`, and `yesAssetId` so makers can size the cash-out
+  and hedge it. `alphaPriceMicro` is Alpha's cash-out reserve **when Alpha
+  could live-price**; it is omitted when you must price the tree yourself.
 - `description` on each leg is a plain-english label
   (e.g. `"NFL Champion 2027 — Baltimore Ravens"`) for logging/UI.
 

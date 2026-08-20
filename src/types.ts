@@ -657,15 +657,23 @@ export type ComboRfqRequestEvent = {
   rfqId: string;
   tree: ComboRfqTree;
   grossStakeMicro: number;
-  /** Whole-combo FAIR probability (micro, pre-edge) — the maker's anchor. Fair
-   *  is computable by any maker with the odds (leaks no Alpha margin) and lets
-   *  you price without a /combo/price round trip. NOT per-leg. On a BUY, quote
-   *  ABOVE fair+edge and compete by going lower; on a SELL, quote BELOW fair−edge
-   *  and compete by going higher. */
+  /** Whole-combo FAIR probability (micro, pre-edge) — the maker's anchor when
+   *  Alpha could live-price the tree. Fair is computable by any maker with the
+   *  odds (leaks no Alpha margin) and lets you price without a /combo/price
+   *  round trip. NOT per-leg. On a BUY, quote ABOVE fair+edge and compete by
+   *  going lower; on a SELL, quote BELOW fair−edge and compete by going higher.
+   *
+   *  **Absent when Alpha could not live-price the combo** (typically a SELL /
+   *  cash-out whose legs have no Polymarket book). You MUST price `tree`
+   *  yourself from AA order books / your SGP feed — do not skip these RFQs
+   *  unless you have no model. `alphaPriceMicro` is also omitted in that case
+   *  (there is no house reserve to beat). */
   fairPriceMicro?: number;
   quoteDeadline: number;
   /** BUY: not broadcast (Alpha's marked-up price is hidden). SELL: Alpha's own
-   *  cash-out offer — the reserve you must BEAT UPWARD to win the seller's YES. */
+   *  cash-out offer — the reserve you must BEAT UPWARD to win the seller's YES.
+   *  Omitted on SELL when Alpha could not live-price (same cases as missing
+   *  `fairPriceMicro`); any valid bid can then win. */
   alphaPriceMicro?: number;
   /** SELL only — the full YES position being cashed out (micro shares). */
   quantityMicro?: number;
